@@ -6,12 +6,13 @@ This file tells AI agents how to use this repository to manage a GitHub Projects
 
 ## What this repository provides
 
-Two interfaces to the same GitHub GraphQL API:
+Three interfaces to the same GitHub GraphQL API:
 
 | Interface | Entry point | When to use |
 | --- | --- | --- |
 | CLI | `scripts/github_project_crud.py` | CI pipelines, shell scripts, one-off commands |
-| MCP server | `scripts/mcp_server.py` | Conversational agents via Claude Desktop (SSE on `127.0.0.1:8765`) |
+| MCP server (stdio) | `scripts/mcp_server.py` | Conversational agents via Claude Desktop |
+| MCP server (SSE + OAuth) | `scripts/mcp_server.py --transport sse --oauth` | Claude claude.ai custom connectors (public HTTPS) |
 
 All responses are JSON. Project context (owner, owner type, and board number) is passed as an explicit argument on every tool call — no board-specific env vars needed.
 
@@ -19,15 +20,61 @@ All responses are JSON. Project context (owner, owner type, and board number) is
 
 ## Environment variables
 
-Only one variable must be set in the environment:
-
 | Variable | Example | Purpose |
 | --- | --- | --- |
-| `GITHUB_TOKEN` | `github_pat_...` | PAT with Projects read+write scope |
+| `GITHUB_TOKEN` | `github_pat_...` | PAT with Projects read+write scope (stdio mode only) |
+| `OAUTH_CLIENT_ID` | `zNaFBv...` | OAuth client ID for the Claude connector |
+| `OAUTH_CLIENT_SECRET` | `NxwTPt...` | OAuth client secret for the Claude connector |
+| `SESSION_SECRET` | `dripp...` | Session signing key for the OAuth server |
+
+In OAuth mode (`--oauth`), `GITHUB_TOKEN` is not read from the environment — each user provides their own GitHub PAT via the consent screen. The token is held in memory and associated with their OAuth access token.
 
 `GITHUB_OWNER`, `GITHUB_OWNER_TYPE`, and `GITHUB_PROJECT_NUMBER` are **not** env vars — pass them as `owner`, `owner_type`, and `project_number` parameters on every MCP tool call, or as `--owner`, `--owner-type`, `--project-number` CLI flags.
 
-The MCP server loads `.env` from the project root automatically (for `GITHUB_TOKEN` only). The CLI does not — export `GITHUB_TOKEN` or use `source .env`.
+The MCP server loads `.env` from the project root automatically. The CLI does not — export `GITHUB_TOKEN` or use `source .env`.
+
+---
+
+## OAuth setup (public Claude connector)
+
+### Architecture
+
+Two processes run on ARMOURY, both proxied through nginx on rafael.pluio.net:
+
+```text
+claude.ai  →  oauth.moisesjafet.com  →  ARMOURY:8766  (oauth_server.py)
+claude.ai  →  mcp.moisesjafet.com    →  ARMOURY:8765  (mcp_server.py --oauth)
+```
+
+### Start servers
+
+```bash
+# OAuth authorization server (port 8766)
+python scripts/oauth_server.py --host 0.0.0.0 --port 8766
+
+# MCP server with OAuth validation (port 8765)
+python scripts/mcp_server.py --transport sse --oauth --host 0.0.0.0 --port 8765
+```
+
+### Register as a Claude custom connector
+
+In claude.ai → Settings → Connectors → Add connector:
+
+| Field | Value |
+| --- | --- |
+| MCP URL | `https://mcp.moisesjafet.com/sse` |
+| OAuth Client ID | value of `OAUTH_CLIENT_ID` in `.env` |
+| OAuth Client Secret | value of `OAUTH_CLIENT_SECRET` in `.env` |
+
+Claude will redirect to `https://oauth.moisesjafet.com/oauth/authorize` automatically.
+
+### Install OAuth dependencies
+
+```bash
+pip install -e ".[oauth]"
+# or individually:
+pip install starlette uvicorn jinja2 python-multipart itsdangerous python-dotenv "mcp[cli]"
+```
 
 ---
 
