@@ -13,12 +13,14 @@ import sys
 from pathlib import Path
 
 # Allow direct execution: python scripts/mcp_server.py
+_project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(_project_root))
 
 from dotenv import load_dotenv  # noqa: E402
 
 # Load .env from project root; fall back to the script's own directory.
-_root_env = Path(__file__).parent.parent / ".env"
+_root_env = _project_root / ".env"
 _local_env = Path(__file__).parent / ".env"
 load_dotenv(_root_env if _root_env.exists() else _local_env)
 
@@ -220,6 +222,37 @@ if __name__ == "__main__":
         default="stdio",
         help="Transport to use (default: stdio — Claude Desktop spawns this process)",
     )
+    _p.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Bind host for SSE/HTTP transports (default: 127.0.0.1)",
+    )
+    _p.add_argument(
+        "--port",
+        type=int,
+        default=8765,
+        help="Bind port for SSE/HTTP transports (default: 8765)",
+    )
+    _p.add_argument(
+        "--oauth",
+        action="store_true",
+        help="Enable OAuth Bearer token validation (for public SSE/HTTP deployments)",
+    )
     _args = _p.parse_args()
 
-    mcp.run(transport=_args.transport)
+    if _args.transport == "stdio":
+        mcp.run(transport="stdio")
+    else:
+        import uvicorn
+        from starlette.middleware.base import BaseHTTPMiddleware
+
+        from oauth.middleware import require_oauth_token
+        from oauth.models import init_db
+
+        _sse_app = mcp.sse_app()
+
+        if _args.oauth:
+            init_db()
+            _sse_app.add_middleware(BaseHTTPMiddleware, dispatch=require_oauth_token)
+
+        uvicorn.run(_sse_app, host=_args.host, port=_args.port)
