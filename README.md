@@ -2,12 +2,13 @@
 
 A Python 3.11+ toolkit for creating, reading, updating, and archiving items on a GitHub Projects v2 board via the GraphQL API.
 
-It ships in two modes:
+It ships in three modes:
 
 - **CLI** (`scripts/github_project_crud.py`) — zero runtime dependencies, pipes JSON to stdout, integrates with CI and shell scripts.
-- **MCP server** (`scripts/mcp_server.py`) — wraps the CLI as a local [Model Context Protocol](https://modelcontextprotocol.io) server so Claude Desktop can manage your project board in plain language.
+- **MCP server / stdio** (`scripts/mcp_server.py`) — wraps the CLI as a local [Model Context Protocol](https://modelcontextprotocol.io) server so Claude Desktop can manage your project board in plain language.
+- **MCP server / OAuth** (`scripts/mcp_server.py --oauth` + `scripts/oauth_server.py`) — publicly reachable MCP server with a standards-compliant OAuth 2.0 authorization server, registerable as a Claude claude.ai custom connector using only a Client ID and Client Secret.
 
-Project identity (owner, type, and board number) is passed as CLI flags or per-call MCP parameters, so the same binary can target different boards without touching any config file. Only `GITHUB_TOKEN` must be set in the environment.
+Project identity (owner, type, and board number) is passed as CLI flags or per-call MCP parameters, so the same binary can target different boards without touching any config file.
 
 ---
 
@@ -19,7 +20,8 @@ Project identity (owner, type, and board number) is passed as CLI flags or per-c
 - [Configuration](#configuration)
 - [Quick Start](#quick-start)
 - [Commands](#commands)
-- [MCP Server](#mcp-server)
+- [MCP Server — Claude Desktop](#mcp-server--claude-desktop)
+- [MCP Server — Claude Connector (OAuth)](#mcp-server--claude-connector-oauth)
 - [GitHub Actions Integration](#github-actions-integration)
 - [Using Multiple Projects](#using-multiple-projects)
 - [Architecture](#architecture)
@@ -44,12 +46,20 @@ Project identity (owner, type, and board number) is passed as CLI flags or per-c
 - All output is newline-terminated JSON — easy to pipe into `jq`
 - Best-effort JSON lifecycle events written to syslog (tokens and response bodies are never logged)
 
-### MCP server
+### MCP server — Claude Desktop
 
 - Exposes every CLI operation as an MCP tool callable by Claude Desktop
 - Default stdio transport — Claude Desktop spawns the process; no separate server to start
 - Optional SSE mode (`--transport sse`) for persistent or multi-client setups
 - Loads `.env` automatically so the token never appears in conversation history
+
+### MCP server — Claude connector (OAuth)
+
+- Standards-compliant OAuth 2.0 authorization server (`scripts/oauth_server.py`)
+- Consent screen collects GitHub Personal Access Token; token is never written to disk
+- Bearer token middleware (`oauth/middleware.py`) gates all MCP requests
+- Authorization code and refresh token grant types; tokens stored in a local SQLite database
+- Register in claude.ai with only Client ID and Client Secret — no manual token copying
 
 ---
 
@@ -91,6 +101,12 @@ pip install -e ".[dev]"
 
 ```bash
 pip install -e ".[mcp]"
+```
+
+**Install OAuth server dependencies (required for the public Claude connector mode):**
+
+```bash
+pip install -e ".[oauth]"
 ```
 
 ---
@@ -360,7 +376,7 @@ Common errors and their causes:
 
 ---
 
-## MCP Server
+## MCP Server — Claude Desktop
 
 `scripts/mcp_server.py` wraps the toolkit as a [Model Context Protocol](https://modelcontextprotocol.io) server. Once running, Claude Desktop on the same machine can create items, update fields, link issues, and archive cards using plain English — no command-line required.
 
@@ -480,6 +496,150 @@ The server always returns structured JSON; Claude formats it in the conversation
 
 ---
 
+## MCP Server — Claude Connector (OAuth)
+
+This mode exposes the MCP server publicly so it can be registered as a [Claude claude.ai custom connector](https://support.anthropic.com/en/articles/11175166-about-custom-connectors) using only an OAuth Client ID and Client Secret — no copying Bearer tokens, no config file editing.
+
+Two processes run together:
+
+```text
+claude.ai ──→ oauth.example.com:443 ──→ oauth_server.py (port 8766)
+                                         /oauth/authorize  (consent screen)
+                                         /oauth/token      (token exchange)
+
+claude.ai ──→  mcp.example.com:443 ──→  mcp_server.py --oauth (port 8765)
+                                         /sse              (MCP over SSE)
+```
+
+### How the OAuth flow works
+
+1. User opens claude.ai → Settings → Connectors and clicks **Connect**.
+2. Claude redirects to your `/oauth/authorize` endpoint.
+3. The consent screen asks for a GitHub Personal Access Token (never stored — held in memory only).
+4. On approval, the server issues an authorization code and redirects back to Claude.
+5. Claude exchanges the code for a Bearer access token at `/oauth/token`.
+6. All subsequent MCP requests carry the Bearer token; the middleware validates it and injects the corresponding GitHub token into the request so tool calls work transparently.
+7. Tokens expire after 1 hour; Claude refreshes them automatically using the refresh token (30-day lifetime).
+
+### Install OAuth dependencies
+
+```bash
+pip install -e ".[oauth]"
+# equivalent:
+pip install starlette uvicorn jinja2 python-multipart itsdangerous "mcp[cli]" python-dotenv
+```
+
+### OAuth environment variables
+
+The credentials in `.env` are generated automatically when you run `make install` or can be set manually:
+
+```bash
+# .env
+
+# GitHub PAT (used in stdio mode; not needed when --oauth is active)
+GITHUB_TOKEN=github_pat_...
+
+# OAuth server credentials — generate with:
+#   python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+OAUTH_CLIENT_ID=<generated>
+OAUTH_CLIENT_SECRET=<generated>
+SESSION_SECRET=<generated>
+```
+
+The `.env` file in this repository already contains generated values for `OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET`, and `SESSION_SECRET`. Regenerate them before any public deployment.
+
+### Start the servers
+
+```bash
+# Terminal 1 — OAuth authorization server
+python scripts/oauth_server.py --host 0.0.0.0 --port 8766
+
+# Terminal 2 — MCP server with Bearer token validation
+python scripts/mcp_server.py --transport sse --oauth --host 0.0.0.0 --port 8765
+```
+
+Both servers load `.env` automatically.
+
+### Expose publicly via nginx (recommended)
+
+Each server needs its own virtual host with SSL. Below is a minimal nginx snippet; adapt domain names and certificate paths to your setup:
+
+```nginx
+# OAuth authorization server
+server {
+    listen 443 ssl;
+    server_name oauth.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/oauth.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/oauth.example.com/privkey.pem;
+
+    location / {
+        proxy_pass         http://127.0.0.1:8766;
+        proxy_set_header   Host $host;
+        proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+    }
+}
+
+# MCP server
+server {
+    listen 443 ssl;
+    server_name mcp.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/mcp.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/mcp.example.com/privkey.pem;
+
+    location / {
+        proxy_pass         http://127.0.0.1:8765;
+        proxy_set_header   Host $host;
+        proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        # Required for SSE
+        proxy_buffering    off;
+        proxy_cache        off;
+        proxy_read_timeout 3600s;
+    }
+}
+```
+
+Both domains must be publicly reachable — Claude's servers need to reach the OAuth endpoints during the auth flow and send MCP requests afterward.
+
+### Register in claude.ai
+
+In claude.ai → Settings → Connectors → **Add connector**, fill in:
+
+| Field | Value |
+| --- | --- |
+| MCP Server URL | `https://mcp.example.com/sse` |
+| OAuth Client ID | Value of `OAUTH_CLIENT_ID` from `.env` |
+| OAuth Client Secret | Value of `OAUTH_CLIENT_SECRET` from `.env` |
+
+Click **Connect**. Claude opens the consent screen at `https://oauth.example.com/oauth/authorize`. Enter your GitHub Personal Access Token, click **Connect →**, and the connector is ready.
+
+### Available tools after connecting
+
+The same seven tools available in Claude Desktop mode are exposed:
+
+| Tool | Description |
+| --- | --- |
+| `list_project_items` | Return all items on the board with their field values |
+| `list_project_fields` | Return all fields and single-select options |
+| `create_project_item` | Create a new draft item (`title`, optional `body`) |
+| `update_project_item_field` | Update a field by item ID (`field_type`: `text`, `number`, `single-select`) |
+| `archive_project_item` | Archive an item by its node ID |
+| `link_issue_to_project` | Add an existing issue to the board by URL |
+| `link_pr_to_project` | Add an existing pull request to the board by URL |
+
+### OAuth security notes
+
+- The GitHub Personal Access Token entered in the consent screen is **never written to disk**. It is held in a process-level environment variable for the duration of the session and cleared when the server restarts.
+- Access tokens expire after 1 hour; refresh tokens expire after 30 days. Both are stored in `.oauth.db` (SQLite, gitignored).
+- The OAuth Client Secret should be treated like a password — rotate it by regenerating the value in `.env` and restarting both servers.
+- The consent screen warns users they are connecting to a self-hosted server. Only share the connector credentials with users you trust.
+- `GITHUB_TOKEN` in `.env` is **not** used when `--oauth` is active; each authenticated user supplies their own token.
+
+---
+
 ## GitHub Actions Integration
 
 Store your token as a repository or organization secret (e.g. `GH_PROJECT_TOKEN`), then use the script directly in a workflow step. Pass owner and project identity as CLI flags so each workflow controls its own target board.
@@ -574,12 +734,18 @@ If you always target the same board, set `GITHUB_OWNER`, `GITHUB_OWNER_TYPE`, an
 
 ## Architecture
 
-The toolkit has two entry points that share the same core library:
+### File map
 
 | File | Role |
 | --- | --- |
 | [`scripts/github_project_crud.py`](scripts/github_project_crud.py) | Core library + CLI (`argparse`) |
-| [`scripts/mcp_server.py`](scripts/mcp_server.py) | MCP server thin wrapper (`FastMCP`) |
+| [`scripts/mcp_server.py`](scripts/mcp_server.py) | MCP server — stdio (Claude Desktop) and SSE+OAuth modes |
+| [`scripts/oauth_server.py`](scripts/oauth_server.py) | OAuth 2.0 authorization server (Starlette, port 8766) |
+| [`oauth/models.py`](oauth/models.py) | SQLite store for OAuth clients, auth codes, and tokens |
+| [`oauth/authorize.py`](oauth/authorize.py) | `/oauth/authorize` — consent screen and code issuance |
+| [`oauth/token.py`](oauth/token.py) | `/oauth/token` — authorization code and refresh token grants |
+| [`oauth/middleware.py`](oauth/middleware.py) | Starlette middleware — validates Bearer tokens on MCP requests |
+| [`templates/oauth/authorize.html`](templates/oauth/authorize.html) | Jinja2 consent screen template |
 
 ### CLI request flow
 
@@ -589,9 +755,23 @@ The toolkit has two entry points that share the same core library:
 4. `get_project_items()` and `get_project_fields()` implement cursor-based pagination and follow all `hasNextPage` signals until the full result set is fetched.
 5. Results are printed as indented JSON to stdout.
 
-### MCP server flow
+### MCP server flow (stdio / Claude Desktop)
 
-`mcp_server.py` imports `github_project_crud` directly and registers each public function as a `FastMCP` tool. Each tool call invokes `_apply_context()`, which sets the three project env vars and clears the in-process cache — making it safe to target different boards in the same server session. Tool return values are serialized JSON strings so Claude can read and summarize them. The server runs a persistent SSE loop on `127.0.0.1:8765`; Claude Desktop connects once and reuses the connection for the lifetime of the conversation.
+`mcp_server.py` imports `github_project_crud` directly and registers each public function as a `FastMCP` tool. Each tool call invokes `_apply_context()`, which sets the three project env vars and clears the in-process cache — making it safe to target different boards in the same server session. Tool return values are serialized JSON strings. Claude Desktop spawns the process over stdio and manages its lifecycle.
+
+### MCP server flow (SSE + OAuth / claude.ai connector)
+
+When started with `--transport sse --oauth`, `mcp_server.py` calls `mcp.sse_app()` to get FastMCP's internal Starlette application, then wraps it with `BaseHTTPMiddleware` backed by `oauth/middleware.py`. Every incoming SSE request must carry a valid `Authorization: Bearer <token>` header. The middleware looks up the token in `.oauth.db`, retrieves the associated GitHub PAT, sets `GITHUB_TOKEN` in the environment for the duration of the request, then restores the previous value — making the token injection transparent to all tool functions.
+
+The OAuth server (`oauth_server.py`) is a separate Starlette process on port 8766. It implements the authorization code grant:
+
+```text
+GET  /oauth/authorize → render consent screen (Jinja2)
+POST /oauth/authorize → validate GitHub token, issue auth code, redirect to Claude
+POST /oauth/token     → exchange auth code or refresh token for Bearer access token
+```
+
+Auth codes expire after 10 minutes. Access tokens expire after 1 hour. Refresh tokens expire after 30 days. All are stored in `.oauth.db` (SQLite, gitignored).
 
 ### Logging
 
@@ -620,14 +800,21 @@ python3 -m venv .venv
 # CLI only
 pip install -e ".[dev]"
 
-# CLI + MCP server
+# CLI + MCP server (stdio)
 pip install -e ".[dev,mcp]"
 
-# Run the test suite (40 tests, no network required)
+# CLI + MCP server + OAuth connector
+pip install -e ".[dev,oauth]"
+
+# Run the test suite (no network required)
 python -m pytest tests/ -v
 
 # Validate syntax without running tests
-python -B -m py_compile scripts/github_project_crud.py scripts/mcp_server.py tests/test_github_project_crud.py
+python -B -m py_compile \
+  scripts/github_project_crud.py \
+  scripts/mcp_server.py \
+  scripts/oauth_server.py \
+  oauth/models.py oauth/authorize.py oauth/token.py oauth/middleware.py
 
 # Lint
 ruff check .
