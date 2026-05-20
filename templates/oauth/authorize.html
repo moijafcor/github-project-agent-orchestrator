@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Connect {{ client_name }}</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 480px;
+           margin: 60px auto; padding: 0 20px; color: #111; }
+    .card { border: 1px solid #e5e7eb; border-radius: 12px; padding: 32px; }
+    h1 { font-size: 1.25rem; margin: 0 0 8px; }
+    .scope-list { background: #f9fafb; border-radius: 8px;
+                  padding: 12px 16px; margin: 16px 0; }
+    .scope-list li { font-size: 0.875rem; color: #374151;
+                     margin: 4px 0; list-style: none; }
+    .scope-list li::before { content: "✓ "; color: #059669; }
+    input[type=password] { width: 100%; padding: 8px 12px;
+                           border: 1px solid #d1d5db; border-radius: 6px;
+                           font-size: 0.875rem; box-sizing: border-box;
+                           margin: 8px 0 16px; }
+    .actions { display: flex; gap: 12px; }
+    button { flex: 1; padding: 10px; border-radius: 6px;
+             font-size: 0.875rem; cursor: pointer; border: none; }
+    .approve { background: #111; color: white; font-weight: 600; }
+    .deny { background: #f3f4f6; color: #374151; }
+    .note { font-size: 0.75rem; color: #9ca3af; margin-top: 16px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>{{ client_name }} wants to connect</h1>
+    <p style="font-size: 0.875rem; color: #6b7280;">
+      This will allow {{ client_name }} to manage your GitHub Projects board.
+    </p>
+
+    <div class="scope-list">
+      <p style="font-size: 0.75rem; font-weight: 600; margin: 0 0 8px;
+                text-transform: uppercase; color: #6b7280;">
+        Tools that will be available:
+      </p>
+      <ul>
+        {% for tool in tools %}
+        <li>{{ tool }}</li>
+        {% endfor %}
+      </ul>
+    </div>
+
+    <form method="POST">
+      <input type="hidden" name="client_id"    value="{{ client_id }}">
+      <input type="hidden" name="redirect_uri" value="{{ redirect_uri }}">
+      <input type="hidden" name="scope"        value="{{ scope }}">
+      <input type="hidden" name="state"        value="{{ state }}">
+
+      <label style="font-size: 0.875rem; font-weight: 500;">
+        Your GitHub Personal Access Token
+      </label>
+      <input type="password" name="github_token"
+             placeholder="ghp_..."
+             autocomplete="off" required>
+      <p style="font-size: 0.75rem; color: #9ca3af; margin: -12px 0 16px;">
+        Required to authenticate with GitHub.
+        Never stored — only held in memory for this session.
+      </p>
+
+      <div class="actions">
+        <button type="submit" name="action" value="deny"    class="deny">Cancel</button>
+        <button type="submit" name="action" value="approve" class="approve">Connect →</button>
+      </div>
+    </form>
+
+    <p class="note">
+      You are connecting to a self-hosted server.
+      Only connect if you trust the operator.
+    </p>
+  </div>
+</body>
+</html>
