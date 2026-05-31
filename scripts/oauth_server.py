@@ -29,15 +29,31 @@ import os
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.sessions import SessionMiddleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from oauth.authorize import authorize_get, authorize_post
 from oauth.models import create_client, init_db
 from oauth.token import token_endpoint
 
+_OAUTH_URL = os.getenv("OAUTH_SERVER_URL", "https://oauth.moisesjafet.com")
+
+
+async def authorization_server_metadata(request: Request) -> JSONResponse:
+    return JSONResponse({
+        "issuer": _OAUTH_URL,
+        "authorization_endpoint": f"{_OAUTH_URL}/oauth/authorize",
+        "token_endpoint": f"{_OAUTH_URL}/oauth/token",
+        "response_types_supported": ["code"],
+        "grant_types_supported": ["authorization_code", "refresh_token"],
+        "code_challenge_methods_supported": ["S256"],
+        "token_endpoint_auth_methods_supported": ["client_secret_post"],
+    })
+
 
 @asynccontextmanager
-async def lifespan(app):
+async def lifespan(_app):
     init_db()
     create_client(
         client_id=os.environ["OAUTH_CLIENT_ID"],
@@ -55,6 +71,7 @@ app = Starlette(
     debug=False,
     lifespan=lifespan,
     routes=[
+        Route("/.well-known/oauth-authorization-server", authorization_server_metadata, methods=["GET"]),
         Route("/oauth/authorize", authorize_get,   methods=["GET"]),
         Route("/oauth/authorize", authorize_post,  methods=["POST"]),
         Route("/oauth/token",     token_endpoint,  methods=["POST"]),

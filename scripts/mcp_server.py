@@ -244,10 +244,23 @@ if __name__ == "__main__":
         mcp.run(transport="stdio")
     else:
         import uvicorn
+        from starlette.applications import Starlette as _Starlette
         from starlette.middleware.base import BaseHTTPMiddleware
+        from starlette.requests import Request as _Request
+        from starlette.responses import JSONResponse as _JSONResponse
+        from starlette.routing import Mount as _Mount, Route as _Route
 
         from oauth.middleware import require_oauth_token
         from oauth.models import init_db
+
+        _MCP_URL = os.getenv("MCP_SERVER_URL", "https://mcp.moisesjafet.com")
+        _OAUTH_URL = os.getenv("OAUTH_SERVER_URL", "https://oauth.moisesjafet.com")
+
+        async def _protected_resource_metadata(request: _Request):
+            return _JSONResponse({
+                "resource": _MCP_URL,
+                "authorization_servers": [_OAUTH_URL],
+            })
 
         _sse_app = mcp.sse_app()
 
@@ -255,4 +268,9 @@ if __name__ == "__main__":
             init_db()
             _sse_app.add_middleware(BaseHTTPMiddleware, dispatch=require_oauth_token)
 
-        uvicorn.run(_sse_app, host=_args.host, port=_args.port)
+        _app = _Starlette(routes=[
+            _Route("/.well-known/oauth-protected-resource", _protected_resource_metadata),
+            _Mount("/", app=_sse_app),
+        ])
+
+        uvicorn.run(_app, host=_args.host, port=_args.port)

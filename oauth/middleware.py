@@ -9,14 +9,20 @@ from starlette.responses import JSONResponse
 
 from . import models
 
+_MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "https://mcp.moisesjafet.com")
+_UNPROTECTED = {"/health", "/.well-known/oauth-protected-resource"}
+_WWW_AUTH = (
+    f'Bearer realm="{_MCP_SERVER_URL}",'
+    f' resource_metadata="{_MCP_SERVER_URL}/.well-known/oauth-protected-resource"'
+)
+
 
 async def require_oauth_token(request: Request, call_next):
     """
     Starlette BaseHTTPMiddleware dispatch function.
     Validates Bearer token and sets GITHUB_TOKEN for the duration of the request.
     """
-    # Health / meta endpoints don't require auth
-    if request.url.path in ("/health",):
+    if request.url.path in _UNPROTECTED:
         return await call_next(request)
 
     auth = request.headers.get("Authorization", "")
@@ -25,6 +31,7 @@ async def require_oauth_token(request: Request, call_next):
         return JSONResponse(
             {"error": "unauthorized", "message": "Bearer token required"},
             status_code=401,
+            headers={"WWW-Authenticate": _WWW_AUTH},
         )
 
     token = auth[7:]
@@ -34,6 +41,7 @@ async def require_oauth_token(request: Request, call_next):
         return JSONResponse(
             {"error": "unauthorized", "message": "Invalid or expired token"},
             status_code=401,
+            headers={"WWW-Authenticate": _WWW_AUTH},
         )
 
     github_token = os.environ.get(f"_GITHUB_TOKEN_{token}")
@@ -41,6 +49,7 @@ async def require_oauth_token(request: Request, call_next):
         return JSONResponse(
             {"error": "unauthorized", "message": "Session expired. Please reconnect."},
             status_code=401,
+            headers={"WWW-Authenticate": _WWW_AUTH},
         )
 
     # Set GITHUB_TOKEN so crud functions pick it up; restore after request
