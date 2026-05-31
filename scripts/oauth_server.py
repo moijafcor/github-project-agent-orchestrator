@@ -15,6 +15,7 @@ Register as a Claude custom connector:
 """
 import argparse
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -35,7 +36,8 @@ from oauth.models import create_client, init_db
 from oauth.token import token_endpoint
 
 
-def startup() -> None:
+@asynccontextmanager
+async def lifespan(app):
     init_db()
     create_client(
         client_id=os.environ["OAUTH_CLIENT_ID"],
@@ -46,10 +48,12 @@ def startup() -> None:
         ],
         name="GitHub Projects Orchestrator",
     )
+    yield
 
 
 app = Starlette(
     debug=False,
+    lifespan=lifespan,
     routes=[
         Route("/oauth/authorize", authorize_get,   methods=["GET"]),
         Route("/oauth/authorize", authorize_post,  methods=["POST"]),
@@ -61,7 +65,6 @@ app = Starlette(
             secret_key=os.environ.get("SESSION_SECRET", os.urandom(32).hex()),
         )
     ],
-    on_startup=[startup],
 )
 
 if __name__ == "__main__":
