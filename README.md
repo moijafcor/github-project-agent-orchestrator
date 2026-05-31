@@ -531,22 +531,30 @@ pip install starlette uvicorn jinja2 python-multipart itsdangerous "mcp[cli]" py
 
 ### OAuth environment variables
 
-The credentials in `.env` are generated automatically when you run `make install` or can be set manually:
+| Variable | Required | Description |
+| --- | --- | --- |
+| `OAUTH_CLIENT_ID` | Yes | Arbitrary string used as the OAuth client identifier when registering in claude.ai |
+| `OAUTH_CLIENT_SECRET` | Yes | Secret paired with `OAUTH_CLIENT_ID`; treat like a password |
+| `SESSION_SECRET` | Yes | Secret key for server-side session signing; must be stable across restarts |
+| `MCP_SERVER_URL` | No | Public base URL of the MCP server (default: `https://mcp.moisesjafet.com`) — used in `WWW-Authenticate` headers and protected-resource metadata |
+| `OAUTH_SERVER_URL` | No | Public base URL of the OAuth server (default: `https://oauth.moisesjafet.com`) — used in authorization-server metadata |
+| `OAUTH_DB_PATH` | No | Path to the SQLite token database (default: `.oauth.db` at the project root) — set this to a persistent directory in containerized deployments |
+
+Generate secrets:
 
 ```bash
-# .env
-
-# GitHub PAT (used in stdio mode; not needed when --oauth is active)
-GITHUB_TOKEN=github_pat_...
-
-# OAuth server credentials — generate with:
-#   python3 -c "import secrets; print(secrets.token_urlsafe(32))"
-OAUTH_CLIENT_ID=<generated>
-OAUTH_CLIENT_SECRET=<generated>
-SESSION_SECRET=<generated>
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
-The `.env` file in this repository already contains generated values for `OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET`, and `SESSION_SECRET`. Regenerate them before any public deployment.
+Minimal `.env` for a self-hosted deployment:
+
+```bash
+OAUTH_CLIENT_ID=github-projects-mcp
+OAUTH_CLIENT_SECRET=<generated>
+SESSION_SECRET=<generated>
+MCP_SERVER_URL=https://mcp.yourdomain.com
+OAUTH_SERVER_URL=https://oauth.yourdomain.com
+```
 
 ### Start the servers
 
@@ -560,49 +568,112 @@ python scripts/mcp_server.py --transport sse --oauth --host 0.0.0.0 --port 8765
 
 Both servers load `.env` automatically.
 
+### Docker deployment (recommended for production)
+
+A `Dockerfile` at the project root builds the complete `.[oauth]` environment. The compose stack runs the MCP server and OAuth server as separate services sharing a named volume for the SQLite token database.
+
+**`docker-compose.yml`:**
+
+```yaml
+services:
+  mcp:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    env_file: .env
+    environment:
+      MCP_SERVER_URL: https://mcp.yourdomain.com
+      OAUTH_SERVER_URL: https://oauth.yourdomain.com
+      OAUTH_DB_PATH: /app/data/.oauth.db
+    volumes:
+      - oauth_db:/app/data
+    command: python scripts/mcp_server.py --transport sse --host 0.0.0.0 --port 8765 --oauth
+
+  oauth:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8766:8766"
+    env_file: .env
+    environment:
+      MCP_SERVER_URL: https://mcp.yourdomain.com
+      OAUTH_SERVER_URL: https://oauth.yourdomain.com
+      OAUTH_DB_PATH: /app/data/.oauth.db
+    volumes:
+      - oauth_db:/app/data
+    command: python scripts/oauth_server.py --host 0.0.0.0 --port 8766
+
+volumes:
+  oauth_db:
+```
+
+`OAUTH_DB_PATH` must point to the shared volume so both containers access the same token database. The `restart: unless-stopped` policy keeps both services running after crashes and host reboots.
+
+```bash
+docker compose build
+docker compose up -d
+```
+
+**Important — proxied deployments:** if the MCP server is behind a reverse proxy (nginx, Cloudflare, etc.), the `FastMCP` constructor in `mcp_server.py` must use `host="0.0.0.0"` (not `127.0.0.1`). When `127.0.0.1` is passed, FastMCP auto-enables DNS-rebinding protection and rejects incoming requests whose `Host` header doesn't match `127.0.0.1:*` — blocking all proxied connections.
+
 ### Expose publicly via nginx (recommended)
 
-Each server needs its own virtual host with SSL. Below is a minimal nginx snippet; adapt domain names and certificate paths to your setup:
+Each server needs its own virtual host with SSL terminated at the nginx edge. The backends can be local (`127.0.0.1`) or remote (e.g. a VPN address when the application servers run on a different machine).
 
 ```nginx
 # OAuth authorization server
 server {
     listen 443 ssl;
-    server_name oauth.example.com;
+    server_name oauth.yourdomain.com;
 
-    ssl_certificate     /etc/letsencrypt/live/oauth.example.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/oauth.example.com/privkey.pem;
+    ssl_certificate     /etc/letsencrypt/live/oauth.yourdomain.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/oauth.yourdomain.com/privkey.pem;
+    include             /etc/letsencrypt/options-ssl-nginx.conf;
 
     location / {
-        proxy_pass         http://127.0.0.1:8766;
-        proxy_set_header   Host $host;
-        proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_pass         http://127.0.0.1:8766;   # or VPN IP, e.g. http://10.10.0.x:8766
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
         proxy_set_header   X-Forwarded-Proto $scheme;
     }
+
+    # HTTP → HTTPS redirect
+    listen 80;
 }
 
 # MCP server
 server {
     listen 443 ssl;
-    server_name mcp.example.com;
+    server_name mcp.yourdomain.com;
 
-    ssl_certificate     /etc/letsencrypt/live/mcp.example.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/mcp.example.com/privkey.pem;
+    ssl_certificate     /etc/letsencrypt/live/mcp.yourdomain.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/mcp.yourdomain.com/privkey.pem;
+    include             /etc/letsencrypt/options-ssl-nginx.conf;
 
     location / {
-        proxy_pass         http://127.0.0.1:8765;
-        proxy_set_header   Host $host;
-        proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_pass         http://127.0.0.1:8765;   # or VPN IP, e.g. http://10.10.0.x:8765
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
         proxy_set_header   X-Forwarded-Proto $scheme;
-        # Required for SSE
+        proxy_http_version 1.1;
+        proxy_set_header   Upgrade    $http_upgrade;
+        proxy_set_header   Connection "upgrade";
+        # Required for SSE — disable all buffering
         proxy_buffering    off;
         proxy_cache        off;
         proxy_read_timeout 3600s;
     }
+
+    listen 80;
 }
 ```
 
-Both domains must be publicly reachable — Claude's servers need to reach the OAuth endpoints during the auth flow and send MCP requests afterward.
+Both domains must be publicly reachable — Claude's servers reach the OAuth endpoints during the auth flow and send MCP requests afterward.
+
+> **Cloudflare users:** set the DNS record to **DNS-only** (grey cloud) while issuing the Let's Encrypt certificate via HTTP-01 challenge; re-enable the proxy (orange cloud) once the cert is issued.
 
 ### Register in claude.ai
 
@@ -610,11 +681,24 @@ In claude.ai → Settings → Connectors → **Add connector**, fill in:
 
 | Field | Value |
 | --- | --- |
-| MCP Server URL | `https://mcp.example.com/sse` |
+| MCP Server URL | `https://mcp.yourdomain.com/sse` |
 | OAuth Client ID | Value of `OAUTH_CLIENT_ID` from `.env` |
 | OAuth Client Secret | Value of `OAUTH_CLIENT_SECRET` from `.env` |
 
-Click **Connect**. Claude opens the consent screen at `https://oauth.example.com/oauth/authorize`. Enter your GitHub Personal Access Token, click **Connect →**, and the connector is ready.
+> **Auto-registration prompt:** claude.ai first attempts RFC 7591 dynamic client registration. This server does not implement that endpoint, so claude.ai will display *"Automatic client registration isn't supported — add an OAuth Client ID."* This is expected. Edit the connector and supply the `OAUTH_CLIENT_ID` and `OAUTH_CLIENT_SECRET` values manually.
+
+Click **Connect**. Claude opens the consent screen at `https://oauth.yourdomain.com/oauth/authorize`. Enter your GitHub Personal Access Token, click **Connect →**, and the connector is ready.
+
+### OAuth discovery endpoints
+
+The servers expose two auto-discovery endpoints required by claude.ai:
+
+| Endpoint | Server | RFC | Purpose |
+| --- | --- | --- | --- |
+| `GET /.well-known/oauth-protected-resource` | MCP (port 8765) | RFC 9728 | Declares the resource and points to the authorization server |
+| `GET /.well-known/oauth-authorization-server` | OAuth (port 8766) | RFC 8414 | Lists `authorization_endpoint`, `token_endpoint`, and supported grant types |
+
+These are public (no authentication required) and are fetched by claude.ai before redirecting the user to the consent screen. `MCP_SERVER_URL` and `OAUTH_SERVER_URL` env vars control the URLs embedded in these responses.
 
 ### Available tools after connecting
 
@@ -632,11 +716,12 @@ The same seven tools available in Claude Desktop mode are exposed:
 
 ### OAuth security notes
 
-- The GitHub Personal Access Token entered in the consent screen is **never written to disk**. It is held in a process-level environment variable for the duration of the session and cleared when the server restarts.
-- Access tokens expire after 1 hour; refresh tokens expire after 30 days. Both are stored in `.oauth.db` (SQLite, gitignored).
-- The OAuth Client Secret should be treated like a password — rotate it by regenerating the value in `.env` and restarting both servers.
-- The consent screen warns users they are connecting to a self-hosted server. Only share the connector credentials with users you trust.
-- `GITHUB_TOKEN` in `.env` is **not** used when `--oauth` is active; each authenticated user supplies their own token.
+- The GitHub Personal Access Token entered in the consent screen is stored in `.oauth.db` (the `access_tokens.github_token` column) for the lifetime of the access token (1 hour). It is deleted when the token expires or the database is cleared. **Protect `.oauth.db` accordingly — set its permissions to 600 and keep it outside of any web-accessible path.**
+- Access tokens expire after 1 hour; refresh tokens expire after 30 days. The associated GitHub token is carried forward on each refresh so users are not re-prompted.
+- The OAuth Client Secret should be treated like a password — rotate it by regenerating the value in `.env` and restarting both servers. All active sessions will be invalidated.
+- Only share the connector credentials (`OAUTH_CLIENT_ID` / `OAUTH_CLIENT_SECRET`) with users you trust. Anyone with those values can initiate the OAuth flow and register their own GitHub token against your server.
+- `GITHUB_TOKEN` in `.env` is **not** used when `--oauth` is active; each authenticated user supplies their own token via the consent screen.
+- In containerized deployments, the SQLite database lives on a named Docker volume. Restrict access to that volume at the host level.
 
 ---
 
@@ -741,11 +826,12 @@ If you always target the same board, set `GITHUB_OWNER`, `GITHUB_OWNER_TYPE`, an
 | [`scripts/github_project_crud.py`](scripts/github_project_crud.py) | Core library + CLI (`argparse`) |
 | [`scripts/mcp_server.py`](scripts/mcp_server.py) | MCP server — stdio (Claude Desktop) and SSE+OAuth modes |
 | [`scripts/oauth_server.py`](scripts/oauth_server.py) | OAuth 2.0 authorization server (Starlette, port 8766) |
-| [`oauth/models.py`](oauth/models.py) | SQLite store for OAuth clients, auth codes, and tokens |
+| [`oauth/models.py`](oauth/models.py) | SQLite store for OAuth clients, auth codes, tokens, and GitHub PATs |
 | [`oauth/authorize.py`](oauth/authorize.py) | `/oauth/authorize` — consent screen and code issuance |
 | [`oauth/token.py`](oauth/token.py) | `/oauth/token` — authorization code and refresh token grants |
-| [`oauth/middleware.py`](oauth/middleware.py) | Starlette middleware — validates Bearer tokens on MCP requests |
+| [`oauth/middleware.py`](oauth/middleware.py) | Starlette middleware — validates Bearer tokens, injects GitHub PAT per request |
 | [`templates/oauth/authorize.html`](templates/oauth/authorize.html) | Jinja2 consent screen template |
+| [`Dockerfile`](Dockerfile) | Container image — `python:3.11-slim`, installs `.[oauth]`, exposes 8765+8766 |
 
 ### CLI request flow
 
@@ -761,17 +847,22 @@ If you always target the same board, set `GITHUB_OWNER`, `GITHUB_OWNER_TYPE`, an
 
 ### MCP server flow (SSE + OAuth / claude.ai connector)
 
-When started with `--transport sse --oauth`, `mcp_server.py` calls `mcp.sse_app()` to get FastMCP's internal Starlette application, then wraps it with `BaseHTTPMiddleware` backed by `oauth/middleware.py`. Every incoming SSE request must carry a valid `Authorization: Bearer <token>` header. The middleware looks up the token in `.oauth.db`, retrieves the associated GitHub PAT, sets `GITHUB_TOKEN` in the environment for the duration of the request, then restores the previous value — making the token injection transparent to all tool functions.
+When started with `--transport sse --oauth`, `mcp_server.py` calls `mcp.sse_app()` to get FastMCP's internal Starlette application, wraps it with `BaseHTTPMiddleware` backed by `oauth/middleware.py`, and mounts the whole thing under a top-level Starlette app that also serves the `/.well-known/oauth-protected-resource` discovery endpoint.
+
+Every incoming SSE request must carry a valid `Authorization: Bearer <token>` header. The middleware queries `OAUTH_DB_PATH` (`.oauth.db` by default) directly — this is what allows the MCP process and the OAuth process to share token state even when they run in separate containers. The middleware retrieves the associated GitHub PAT from the `access_tokens.github_token` column, sets `GITHUB_TOKEN` in the environment for the duration of the request, then restores the previous value — making the injection transparent to all tool functions.
+
+Unauthenticated requests receive a `401` with a `WWW-Authenticate` header pointing to the protected-resource metadata URL, from which claude.ai discovers the authorization server.
 
 The OAuth server (`oauth_server.py`) is a separate Starlette process on port 8766. It implements the authorization code grant:
 
 ```text
-GET  /oauth/authorize → render consent screen (Jinja2)
-POST /oauth/authorize → validate GitHub token, issue auth code, redirect to Claude
+GET  /.well-known/oauth-authorization-server → RFC 8414 metadata (issuer, endpoints, grant types)
+GET  /oauth/authorize → render consent screen (Jinja2 template)
+POST /oauth/authorize → validate GitHub PAT, issue auth code, redirect to Claude callback
 POST /oauth/token     → exchange auth code or refresh token for Bearer access token
 ```
 
-Auth codes expire after 10 minutes. Access tokens expire after 1 hour. Refresh tokens expire after 30 days. All are stored in `.oauth.db` (SQLite, gitignored).
+The GitHub PAT entered on the consent screen is stored in process memory (`os.environ`) only until the token exchange completes (≤ 10 minutes). After the exchange it moves to `.oauth.db`. Auth codes expire after 10 minutes. Access tokens expire after 1 hour. Refresh tokens expire after 30 days.
 
 ### Logging
 
