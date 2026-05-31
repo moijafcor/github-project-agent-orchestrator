@@ -1,11 +1,15 @@
 """
 Validates Bearer tokens on incoming MCP requests.
 Sets GITHUB_TOKEN in env so crud functions pick it up transparently.
+
+Uses a pure ASGI class rather than BaseHTTPMiddleware — the latter buffers
+the full response body, which breaks SSE streaming connections.
 """
 import os
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from . import models
 
@@ -17,53 +21,55 @@ _WWW_AUTH = (
 )
 
 
-async def require_oauth_token(request: Request, call_next):
-    """
-    Starlette BaseHTTPMiddleware dispatch function.
-    Validates Bearer token and sets GITHUB_TOKEN for the duration of the request.
-    """
-    if request.url.path in _UNPROTECTED:
-        return await call_next(request)
+class OAuthMiddleware:
+    """Pure ASGI middleware — passes scope/receive/send straight through so SSE works."""
 
-    auth = request.headers.get("Authorization", "")
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
 
-    if not auth.startswith("Bearer "):
-        return JSONResponse(
-            {"error": "unauthorized", "message": "Bearer token required"},
-            status_code=401,
-            headers={"WWW-Authenticate": _WWW_AUTH},
-        )
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
 
-    token = auth[7:]
-    token_row = models.validate_access_token(token)
+        request = Request(scope, receive)
 
-    if not token_row:
-        return JSONResponse(
-            {"error": "unauthorized", "message": "Invalid or expired token"},
-            status_code=401,
-            headers={"WWW-Authenticate": _WWW_AUTH},
-        )
+        if request.url.path in _UNPROTECTED:
+            await self.app(scope, receive, send)
+            return
 
-    github_token = models.get_github_token(token)
-    if not github_token:
-        return JSONResponse(
-            {"error": "unauthorized", "message": "Session expired. Please reconnect."},
-            status_code=401,
-            headers={"WWW-Authenticate": _WWW_AUTH},
-        )
+        auth = request.headers.get("Authorization", "")
 
-    # Set GITHUB_TOKEN so crud functions pick it up; restore after request
-    previous = os.environ.get("GITHUB_TOKEN")
-    os.environ["GITHUB_TOKEN"] = github_token
-    request.state.github_token = github_token
-    request.state.user_id = token_row["user_id"]
+        if not auth.startswith("Bearer "):
+            await _deny(scope, receive, send, "Bearer token required")
+            return
 
-    try:
-        response = await call_next(request)
-    finally:
-        if previous is None:
-            os.environ.pop("GITHUB_TOKEN", None)
-        else:
-            os.environ["GITHUB_TOKEN"] = previous
+        token = auth[7:]
+        if not models.validate_access_token(token):
+            await _deny(scope, receive, send, "Invalid or expired token")
+            return
 
-    return response
+        github_token = models.get_github_token(token)
+        if not github_token:
+            await _deny(scope, receive, send, "Session expired. Please reconnect.")
+            return
+
+        previous = os.environ.get("GITHUB_TOKEN")
+        os.environ["GITHUB_TOKEN"] = github_token
+
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            if previous is None:
+                os.environ.pop("GITHUB_TOKEN", None)
+            else:
+                os.environ["GITHUB_TOKEN"] = previous
+
+
+async def _deny(scope: Scope, receive: Receive, send: Send, message: str) -> None:
+    response = JSONResponse(
+        {"error": "unauthorized", "message": message},
+        status_code=401,
+        headers={"WWW-Authenticate": _WWW_AUTH},
+    )
+    await response(scope, receive, send)
