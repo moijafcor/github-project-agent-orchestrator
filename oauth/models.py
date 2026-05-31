@@ -3,12 +3,13 @@ SQLite-backed OAuth 2.0 models.
 Lightweight — no ORM dependency, plain sqlite3.
 """
 import json
+import os
 import secrets
 import sqlite3
 import time
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent.parent / ".oauth.db"
+DB_PATH = Path(os.getenv("OAUTH_DB_PATH", str(Path(__file__).parent.parent / ".oauth.db")))
 
 
 def get_db() -> sqlite3.Connection:
