@@ -47,23 +47,25 @@ async def authorize_get(request: Request) -> HTMLResponse:
     client = _get_client(client_id)
     if not client:
         return templates.TemplateResponse(
+            request,
             "oauth/error.html",
-            {"request": request, "error": "Unknown client"},
+            {"error": "Unknown client"},
             status_code=400,
         )
 
     registered = json.loads(client["redirect_uris"])
     if redirect_uri not in registered:
         return templates.TemplateResponse(
+            request,
             "oauth/error.html",
-            {"request": request, "error": "Invalid redirect_uri"},
+            {"error": "Invalid redirect_uri"},
             status_code=400,
         )
 
     return templates.TemplateResponse(
+        request,
         "oauth/authorize.html",
         {
-            "request": request,
             "client_name": client["name"],
             "client_id": client_id,
             "redirect_uri": redirect_uri,
@@ -90,8 +92,9 @@ async def authorize_post(request: Request) -> RedirectResponse:
     github_token = form.get("github_token", "")
     if not github_token:
         return templates.TemplateResponse(
+            request,
             "oauth/error.html",
-            {"request": request, "error": "GitHub token required"},
+            {"error": "GitHub token required"},
             status_code=400,
         )
 
