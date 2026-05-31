@@ -51,11 +51,8 @@ async def _handle_auth_code(form) -> JSONResponse:
         return JSONResponse({"error": "invalid_grant"}, status_code=400)
 
     access_token, refresh_token = models.create_access_token(
-        client_id, user_id, auth_code["scope"]
+        client_id, user_id, auth_code["scope"], github_token=github_token
     )
-
-    # Associate GitHub token with this access token for MCP tool calls
-    os.environ[f"_GITHUB_TOKEN_{access_token}"] = github_token
 
     return JSONResponse({
         "access_token": access_token,
@@ -86,13 +83,11 @@ async def _handle_refresh(form) -> JSONResponse:
         if not rt:
             return JSONResponse({"error": "invalid_grant"}, status_code=400)
 
-    new_access, new_refresh = models.create_access_token(
-        rt["client_id"], rt["user_id"], "mcp"
-    )
+    github_token = models.get_github_token(rt["access_token"]) or ""
 
-    old_github_token = os.environ.pop(f"_GITHUB_TOKEN_{rt['access_token']}", None)
-    if old_github_token:
-        os.environ[f"_GITHUB_TOKEN_{new_access}"] = old_github_token
+    new_access, new_refresh = models.create_access_token(
+        rt["client_id"], rt["user_id"], "mcp", github_token=github_token
+    )
 
     return JSONResponse({
         "access_token": new_access,

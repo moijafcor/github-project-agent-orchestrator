@@ -44,7 +44,7 @@ async def require_oauth_token(request: Request, call_next):
             headers={"WWW-Authenticate": _WWW_AUTH},
         )
 
-    github_token = os.environ.get(f"_GITHUB_TOKEN_{token}")
+    github_token = models.get_github_token(token)
     if not github_token:
         return JSONResponse(
             {"error": "unauthorized", "message": "Session expired. Please reconnect."},

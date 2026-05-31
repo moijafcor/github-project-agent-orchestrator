@@ -46,7 +46,8 @@ def init_db() -> None:
                 user_id       TEXT NOT NULL,
                 scope         TEXT NOT NULL,
                 expires_at    INTEGER NOT NULL,
-                created_at    INTEGER NOT NULL
+                created_at    INTEGER NOT NULL,
+                github_token  TEXT NOT NULL DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS refresh_tokens (
@@ -57,6 +58,11 @@ def init_db() -> None:
                 expires_at    INTEGER NOT NULL
             );
         """)
+        # Migration for existing DBs that predate the github_token column
+        try:
+            conn.execute("ALTER TABLE access_tokens ADD COLUMN github_token TEXT NOT NULL DEFAULT ''")
+        except Exception:
+            pass
 
 
 def create_client(
@@ -104,22 +110,33 @@ def create_access_token(
     client_id: str,
     user_id: str,
     scope: str,
+    github_token: str = "",
 ) -> tuple[str, str]:
-    """Returns (access_token, refresh_token)."""
+    """Returns (access_token, refresh_token). Stores github_token in DB for cross-process lookup."""
     access = secrets.token_urlsafe(48)
     refresh = secrets.token_urlsafe(48)
     now = int(time.time())
 
     with get_db() as conn:
         conn.execute(
-            "INSERT INTO access_tokens VALUES (?,?,?,?,?,?)",
-            (access, client_id, user_id, scope, now + 3600, now),  # 1 hour
+            "INSERT INTO access_tokens VALUES (?,?,?,?,?,?,?)",
+            (access, client_id, user_id, scope, now + 3600, now, github_token),
         )
         conn.execute(
             "INSERT INTO refresh_tokens VALUES (?,?,?,?,?)",
             (refresh, access, client_id, user_id, now + 86400 * 30),  # 30 days
         )
     return access, refresh
+
+
+def get_github_token(access_token: str) -> str | None:
+    """Return the GitHub PAT associated with a valid access token, or None."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT github_token FROM access_tokens WHERE token=? AND expires_at>?",
+            (access_token, int(time.time())),
+        ).fetchone()
+    return row["github_token"] or None if row else None
 
 
 def validate_access_token(token: str) -> sqlite3.Row | None:
