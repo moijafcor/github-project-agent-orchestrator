@@ -30,7 +30,7 @@ from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 mcp = FastMCP(
     "GitHub Projects",
-    host="127.0.0.1",
+    host="0.0.0.0",
     port=8765,
     instructions=(
         "CRUD operations on a GitHub Projects v2 board. "
