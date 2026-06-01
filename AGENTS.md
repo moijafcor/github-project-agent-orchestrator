@@ -286,6 +286,32 @@ All commands exit `0` on success and `1` on failure. Output is always JSON.
 
 ---
 
+## OAuth server
+
+### Token lifetime
+
+Access tokens and refresh tokens are issued with a 1-year TTL. Existing tokens
+issued before this change are unaffected — they expire on their original schedule.
+After a server update, reconnect once via Customize → Connectors → Connect to
+obtain a fresh 1-year token.
+
+### Revoking all active tokens
+
+If `GITHUB_TOKEN` is rotated or access needs to be revoked immediately:
+
+```bash
+# Delete all active tokens
+sqlite3 .oauth.db "DELETE FROM access_tokens;"
+sqlite3 .oauth.db "DELETE FROM refresh_tokens;"
+
+# Restart the OAuth server
+docker restart mcp-oauth-1
+```
+
+User must reconnect via Customize → Connectors → Connect after revocation.
+
+---
+
 ## Constraints and limits
 
 - **No bulk mutations** — every write targets a single item; loop for bulk operations.
