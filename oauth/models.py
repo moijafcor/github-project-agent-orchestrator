@@ -11,6 +11,10 @@ from pathlib import Path
 
 DB_PATH = Path(os.getenv("OAUTH_DB_PATH", str(Path(__file__).parent.parent / ".oauth.db")))
 
+# Token lifetime configuration
+ACCESS_TOKEN_TTL_SECONDS  = 86400 * 365  # 1 year
+REFRESH_TOKEN_TTL_SECONDS = 86400 * 365  # 1 year
+
 
 def get_db() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
@@ -120,11 +124,11 @@ def create_access_token(
     with get_db() as conn:
         conn.execute(
             "INSERT INTO access_tokens VALUES (?,?,?,?,?,?,?)",
-            (access, client_id, user_id, scope, now + 3600, now, github_token),
+            (access, client_id, user_id, scope, now + ACCESS_TOKEN_TTL_SECONDS, now, github_token),
         )
         conn.execute(
             "INSERT INTO refresh_tokens VALUES (?,?,?,?,?)",
-            (refresh, access, client_id, user_id, now + 86400 * 30),  # 30 days
+            (refresh, access, client_id, user_id, now + REFRESH_TOKEN_TTL_SECONDS),
         )
     return access, refresh
 
